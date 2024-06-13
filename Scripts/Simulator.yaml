@@ -1,0 +1,200 @@
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: mqtt-publisher
+  namespace: azure-iot-operations
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mqtt-publisher-deployment
+  namespace: azure-iot-operations
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mqtt-publisher
+  template:
+    metadata:
+      labels:
+        app: mqtt-publisher
+    spec:
+      serviceAccountName: mqtt-publisher
+      containers:
+      - name: mqtt-publisher
+        image: alpine/curl
+        env:
+        - name: MQTT_TOPIC
+          value: "Contoso/Bronze/Chambery/Line1/Assembly"
+        - name: MQTTUI_BROKER
+          value: 'mqtt://192.168.0.4:1883'
+        - name: MQTTUI_USERNAME
+          value: '$sat'
+        - name: SLEEP_DURATION_SECONDS
+          value: "1.00"
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          apk add mqttui bc jq
+          export MQTTUI_PASSWORD=$(cat /var/run/secrets/tokens/mqtt-client-token)
+          MSG_COUNT=0
+          SEQUENCENUMBER=1
+          SECONDS=0
+          INSHIFT=1
+          PLANNEDPRODUCTIONTIME=0
+          REPORT_INTERVAL=7
+          while true; do
+            CURRENT_HOUR=$(date +%H)
+            if [ "$INSHIFT" -eq 1 ]; then
+                if [ "$CURRENT_HOUR" -ge 8 ]; then
+                    # we switch to shift 2
+                    INSHIFT=2 
+                    PLANNEDPRODUCTIONTIME=0
+                fi
+            elif [ "$INSHIFT" -eq 2 ]; then
+                if [ "$CURRENT_HOUR" -ge 16 ]; then
+                    # we switch to shift 3
+                    INSHIFT=3 
+                    PLANNEDPRODUCTIONTIME=0
+                fi
+            elif [ "$INSHIFT" -eq 3 ]; then
+                if [ "$CURRENT_HOUR" -lt 1 ]; then
+                    # we switch to shift 1
+                    INSHIFT=1 
+                    PLANNEDPRODUCTIONTIME=0
+                fi
+            fi
+            
+            # Generate random values for temperature, pressure and vibration
+            ENERGY=$(awk -v min=5.0 -v max=6.0 'BEGIN{srand(); print min+rand()*(max-min)}')
+            HUMIDITY=$(echo "scale=10; 20 + ($RANDOM/32767)*10" | bc)
+            TEMP=$(echo "scale=5; 52 + ($RANDOM/32767)*3" | bc)
+            PRES=$(awk -v min=290 -v max=300 'BEGIN{srand(); print min+rand()*(max-min)}')
+            VIB=$(awk -v min=0.001 -v max=0.005 'BEGIN{srand(); print min+rand()*(max-min)}')
+            ERRORPROB=$(echo "scale=10; $RANDOM/32767" | bc)
+            ERRORREASON='N/A'
+            CYCLETIME=$(printf "%.0f" $(echo "scale=10; 4000 + ($RANDOM/32767)*1000" | bc))
+            PLANNEDPRODUCTIONTIME=$((PLANNEDPRODUCTIONTIME+CYCLETIME))
+            
+            #Managing quality status
+            STATUS=1 #in progress
+            ERRORPROB_TEST=$(echo "$ERRORPROB > 0.999" | bc -l)
+            if [ "$ERRORPROB_TEST" -eq 1 ]; then
+                STATUS=3 #critical error
+                ERRORREASON='Secutity stop - Main motor overheat temperature'
+                CYCLETIME=$(echo "scale=10; 60000 + ($RANDOM/32767)*20000" | bc)
+            else
+                ERRORPROB_TEST=$(echo "$ERRORPROB > 0.985" | bc -l)
+                if [ "$ERRORPROB_TEST" -eq 1 ]; then
+                    STATUS=2 #scrap, product dropped
+                    ERRORREASON='Quality check failed'
+                    CYCLETIME=$(echo "scale=10; 5000 + ($RANDOM/32767)*2000" | bc)
+                else
+                    ERRORREASON=''
+                fi
+            fi
+            
+            DATA=$(jq -n \
+                      --arg ts "$(date +'%Y-%m-%dT%H:%M:%S.%6N')0000000Z" \
+                      --arg dataSetWriterName "Chambery_1_Line1_1__asset_0" \
+                      --arg assetid "Chambery_Line1_Assembly" \
+                      --arg prefix "Line1_1__assembly_" \
+                      --arg suffix "__0" \
+                      --arg sn "$SEQUENCENUMBER" \
+                      --arg errorreason "$ERRORREASON" \
+                      --argjson energy "$ENERGY" \
+                      --argjson humidity "$HUMIDITY" \
+                      --argjson temp "$TEMP" \
+                      --argjson pres "$PRES" \
+                      --argjson vib "$VIB" \
+                      --argjson cycletime "$CYCLETIME" \
+                      --argjson plannedProductionTime "$PLANNEDPRODUCTIONTIME" \
+                      --argjson status "$STATUS" \
+                      '[
+                        {
+                            "DataSetWriterName": $dataSetWriterName,
+                            "Payload": {
+                              ($prefix + "assetid" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $assetid
+                              },
+                              ($prefix + "lastcycletime" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $cycletime
+                              },
+                              ($prefix + "machinestatus" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": 1
+                              },
+                              ($prefix + "qualitystatus" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $status
+                              }, 
+                              ($prefix + "errorreason" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $errorreason
+                              }, 
+                              ($prefix + "plannedproductiontime" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $plannedProductionTime
+                              },                                
+                              ($prefix + "energyconsumed" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $energy
+                              },                              
+                              ($prefix + "humidity" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $humidity
+                              },   
+                              ($prefix + "pressure" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $pres
+                              },                                
+                              ($prefix + "temperature" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $temp
+                              }, 
+                              ($prefix + "vibration" + $suffix): {
+                                "SourceTimestamp": $ts,
+                                "Value": $vib
+                              }
+                            },
+                            "SequenceNumber": $sn,
+                            "Timestamp": $ts
+                        }
+                       ]')
+
+            mqttui publish -i "iiot-scenario-walkthru" $MQTT_TOPIC "$DATA"
+
+            SEQUENCENUMBER=$((SEQUENCENUMBER+1))
+            MSG_COUNT=$((MSG_COUNT+1))
+
+             # Use awk to add a floating point number to SECONDS
+            SLEEP_DURATION_SECONDS=$(echo "$CYCLETIME/1000" | bc)
+            SECONDS=$(awk -v sec=$SECONDS -v dur=$SLEEP_DURATION_SECONDS 'BEGIN {print sec + dur}')
+            
+            if [ $(echo "$SECONDS / $REPORT_INTERVAL" | bc) -gt 0 ]; then
+              echo "Messages published in the last $REPORT_INTERVAL seconds: $MSG_COUNT"
+              MSG_COUNT=0
+              SECONDS=0
+            fi
+            
+            # We let the process sleep for a time aligned with the cycle time
+            SLEEP_DURATION_MICROSECONDS=$(echo "$SLEEP_DURATION_SECONDS*1000000/1" | bc)
+            usleep $SLEEP_DURATION_MICROSECONDS
+
+          done
+        volumeMounts:
+        - name: mqtt-client-token
+          mountPath: "/var/run/secrets/tokens"
+          readOnly: true
+      volumes:
+      - name: mqtt-client-token
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: mqtt-client-token
+              expirationSeconds: 86400
+              audience: "aio-mq"

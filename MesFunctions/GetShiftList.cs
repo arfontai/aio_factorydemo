@@ -20,9 +20,9 @@ namespace AIOFactoryDemo
             _logger.LogInformation("In MES/GetShiftList function");
 
             // string site = req.Query["site"];
-            string site = "Seattle";
+            //string site = "Seattle";
 
-            var shifts = ShiftDataListHelper.GetShifts(site);
+            var shifts = ShiftDataListHelper.GetShifts();
             if (shifts != null)
             {
                 _logger.LogInformation($"{shifts.Count} Shifts returned");
